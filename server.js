@@ -1,110 +1,145 @@
 const express = require("express");
+const axios = require("axios");
 const cors = require("cors");
 
 const app = express();
 app.use(cors());
-app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-/* =========================
-   WEBSITE CHECK ROUTE
-========================= */
+/*
+====================================
+PRESET SERVICES
+====================================
+*/
 
-app.post("/check", async (req, res) => {
-  const { url } = req.body;
+const services = [
+  // Atlassian Statuspage services
+  { name: "Discord", url: "https://discordstatus.com/api/v2/summary.json", type: "statuspage" },
+  { name: "Cloudflare", url: "https://www.cloudflarestatus.com/api/v2/summary.json", type: "statuspage" },
+  { name: "GitHub", url: "https://www.githubstatus.com/api/v2/summary.json", type: "statuspage" },
+  { name: "OpenAI", url: "https://status.openai.com/api/v2/summary.json", type: "statuspage" },
+  { name: "Reddit", url: "https://www.redditstatus.com/api/v2/summary.json", type: "statuspage" },
+  { name: "Twitch", url: "https://status.twitch.tv/api/v2/summary.json", type: "statuspage" },
 
-  if (!url) {
-    return res.status(400).json({ error: "No URL provided" });
-  }
+  // AWS (custom format)
+  { name: "Amazon Web Services (AWS)", url: "https://status.aws.amazon.com/data.json", type: "aws" },
 
-  try {
-    const start = Date.now();
-    const response = await fetch(url);
-    const end = Date.now();
+  // Google Cloud (custom format)
+  { name: "Google Cloud", url: "https://status.cloud.google.com/incidents.json", type: "gcloud" }
+];
 
-    res.json({
-      status: response.ok ? "UP" : "DOWN",
-      code: response.status,
-      responseTime: end - start
-    });
+/*
+====================================
+STATUS MAPPING
+====================================
+*/
 
-  } catch {
-    res.json({
-      status: "DOWN",
-      code: null,
-      responseTime: null
-    });
-  }
-});
-
-/* =========================
-   STATUSPAGE SERVICES
-========================= */
-
-const services = {
-  discord: "https://discordstatus.com/api/v2/summary.json",
-  cloudflare: "https://www.cloudflarestatus.com/api/v2/summary.json",
-  github: "https://www.githubstatus.com/api/v2/summary.json",
-  openai: "https://status.openai.com/api/v2/summary.json",
-  reddit: "https://www.redditstatus.com/api/v2/summary.json",
-  twitch: "https://status.twitch.tv/api/v2/summary.json"
-};
-
-/* =========================
-   SERVICE STATUS ROUTE
-========================= */
-
-app.post("/service-status", async (req, res) => {
-  const { service } = req.body;
-
-  if (!services[service]) {
-    return res.status(400).json({ error: "Unknown service" });
-  }
-
-  try {
-    const response = await fetch(services[service], {
-      headers: { "User-Agent": "Mozilla/5.0" }
-    });
-
-    const data = await response.json();
-    const indicator = data.status.indicator;
-
-    res.json({
-      name: service,
-      status: normalize(indicator)
-    });
-
-  } catch {
-    res.status(500).json({
-      name: service,
-      status: "Error"
-    });
-  }
-});
-
-/* =========================
-   NORMALIZER
-========================= */
-
-function normalize(indicator) {
+function mapStatus(indicator) {
   switch (indicator) {
     case "none":
       return "Operational";
     case "minor":
       return "Minor Issues";
     case "major":
-      return "Major Outage";
     case "critical":
-      return "Critical Outage";
+      return "Major Outage";
     default:
-      return "Unknown";
+      return "Operational";
   }
 }
 
-/* =========================
-   START SERVER
-========================= */
+/*
+====================================
+SERVICE CHECK LOGIC
+====================================
+*/
+
+async function checkService(service) {
+  try {
+    const response = await axios.get(service.url, { timeout: 8000 });
+
+    // Atlassian Statuspage services
+    if (service.type === "statuspage") {
+      const indicator = response.data.status.indicator;
+      return {
+        name: service.name,
+        status: mapStatus(indicator)
+      };
+    }
+
+    // AWS
+    if (service.type === "aws") {
+      const data = response.data;
+      let hasIssue = false;
+
+      for (const region in data) {
+        if (!data[region].services) continue;
+
+        for (const serviceName in data[region].services) {
+          const status = data[region].services[serviceName];
+          if (status !== "available") {
+            hasIssue = true;
+          }
+        }
+      }
+
+      return {
+        name: service.name,
+        status: hasIssue ? "Minor Issues" : "Operational"
+      };
+    }
+
+    // Google Cloud
+    if (service.type === "gcloud") {
+      const incidents = response.data;
+      return {
+        name: service.name,
+        status: incidents.length > 0 ? "Minor Issues" : "Operational"
+      };
+    }
+
+    return { name: service.name, status: "Operational" };
+
+  } catch (error) {
+    return {
+      name: service.name,
+      status: "Error"
+    };
+  }
+}
+
+/*
+====================================
+API ROUTE
+====================================
+*/
+
+app.get("/api/status", async (req, res) => {
+  const results = await Promise.all(services.map(checkService));
+  res.json(results);
+});
+
+/*
+====================================
+KEEP ALIVE (ANTI SLEEP)
+====================================
+*/
+
+setInterval(async () => {
+  try {
+    await Promise.all(services.map(checkService));
+    console.log("Heartbeat check completed.");
+  } catch (err) {
+    console.log("Heartbeat error:", err.message);
+  }
+}, 5 * 60 * 1000); // every 5 minutes
+
+/*
+====================================
+START SERVER
+====================================
+*/
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
