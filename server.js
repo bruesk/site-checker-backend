@@ -51,37 +51,9 @@ const services = {
   twitch: "https://status.twitch.tv/api/v2/summary.json"
 };
 
-/* =========================
-   SERVICE STATUS ROUTE
-========================= */
-
-app.post("/service-status", async (req, res) => {
-  const { service } = req.body;
-
-  if (!services[service]) {
-    return res.status(400).json({ error: "Unknown service" });
-  }
-
-  try {
-    const response = await fetch(services[service], {
-      headers: { "User-Agent": "Mozilla/5.0" }
-    });
-
-    const data = await response.json();
-    const indicator = data.status.indicator;
-
-    res.json({
-      name: service,
-      status: normalize(indicator)
-    });
-
-  } catch {
-    res.status(500).json({
-      name: service,
-      status: "Error"
-    });
-  }
-});
+let cachedStatus = {};
+let lastUpdated = 0;
+const REFRESH_INTERVAL = 60000;
 
 /* =========================
    NORMALIZER
@@ -101,6 +73,53 @@ function normalize(indicator) {
       return "Unknown";
   }
 }
+
+/* =========================
+   FETCH ALL SERVICES
+========================= */
+
+async function fetchAllServices() {
+  const results = {};
+
+  for (const key in services) {
+    try {
+      const response = await fetch(services[key], {
+        headers: { "User-Agent": "Mozilla/5.0" }
+      });
+
+      const data = await response.json();
+      const indicator = data.status.indicator;
+      results[key] = normalize(indicator);
+    } catch {
+      results[key] = "Error";
+    }
+  }
+
+  cachedStatus = results;
+  lastUpdated = Date.now();
+  console.log("Services updated at", new Date(lastUpdated).toISOString());
+}
+
+fetchAllServices();
+setInterval(fetchAllServices, REFRESH_INTERVAL);
+
+/* =========================
+   PUBLIC ROUTE
+========================= */
+
+app.get("/all-status", (req, res) => {
+  const now = Date.now();
+  const nextRefreshIn = Math.max(
+    0,
+    REFRESH_INTERVAL - (now - lastUpdated)
+  );
+
+  res.json({
+    statuses: cachedStatus,
+    lastUpdated,
+    nextRefreshIn
+  });
+});
 
 /* =========================
    START SERVER
